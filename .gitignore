@@ -216,3 +216,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ===== Java =====
+*.class
+*.jar
+.classpath
+.project
+.settings/
+
+# ===== IDE (aktif hale getirildi) =====
+.idea/
+.vscode/
+
+# ===== OS junk =====
+.DS_Store
+Thumbs.db
