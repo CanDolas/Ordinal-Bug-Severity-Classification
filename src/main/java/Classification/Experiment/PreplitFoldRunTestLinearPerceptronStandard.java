@@ -1,0 +1,161 @@
+package Classification.Experiment;
+
+import Classification.Performance.ConfusionMatrix;
+import Classification.Performance.DetailedClassificationPerformance;
+
+import Classification.Model.Model;
+import Classification.Model.NeuralNetwork.LinearPerceptronModel;
+import Classification.Parameter.LinearPerceptronParameter;
+import Classification.Model.DiscreteFeaturesNotAllowed;
+
+import org.junit.Test;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.function.Supplier;
+
+/**
+ * LP + Standard (nominal baseline)
+ * Reads fold files pre-split on the Python side via PreSplitFoldRun.
+ * Writes per-fold metrics + confusion matrices to Excel, and the mean to console.
+ */
+public class PreSplitFoldRunTestLinearPerceptronStandard {
+
+    private static final String FOLDS_DIR = "datasets/folds_output";
+    private static final int K = 10;
+    private static final List<String> ORDINAL_ORDER = Arrays.asList(
+            "P1", "P2", "P3", "P4", "P5",
+            "S4", "S3", "normal", "critical");
+
+    private static class Job {
+        final String prefix; final int numFeatures; final ArrayList<String> labels;
+        Job(String prefix, int numFeatures, String... labels) {
+            this.prefix = prefix; this.numFeatures = numFeatures;
+            this.labels = new ArrayList<>(Arrays.asList(labels));
+            this.labels.sort((o1, o2) -> {
+                int i1 = ORDINAL_ORDER.indexOf(o1.trim());
+                int i2 = ORDINAL_ORDER.indexOf(o2.trim());
+                if (i1 == -1 || i2 == -1) return o1.compareToIgnoreCase(o2);
+                return Integer.compare(i1, i2);
+            });
+        }
+    }
+
+    private LinearPerceptronParameter getDefaultLPParameters() {
+        return new LinearPerceptronParameter(42, 0.01, 0.95, 0.2, 100);
+    }
+
+    private Supplier<Model> lpFactory(ArrayList<String> sortedLabels) {
+        // Standard: no ensemble, a single LinearPerceptron model directly (nominal baseline)
+        return () -> new LinearPerceptronModel();
+    }
+
+    private double[] calculateOrdinalMetrics(ConfusionMatrix cm, ArrayList<String> classLabels) {
+        double sumAbsError = 0, sumSqError = 0; int totalCount = 0;
+        for (int i = 0; i < classLabels.size(); i++) {
+            String actual = classLabels.get(i);
+            for (int j = 0; j < classLabels.size(); j++) {
+                String pred = classLabels.get(j);
+                int count = 0;
+                if (cm != null && cm.getMatrix().containsKey(actual)) {
+                    HashMap<String, Integer> row = cm.getMatrix().get(actual);
+                    if (row != null && row.containsKey(pred)) count = row.get(pred);
+                }
+                if (count > 0) {
+                    double d = Math.abs(i - j);
+                    sumAbsError += count * d; sumSqError += count * d * d; totalCount += count;
+                }
+            }
+        }
+        double mae = (totalCount > 0) ? sumAbsError / totalCount : 0.0;
+        double rmse = (totalCount > 0) ? Math.sqrt(sumSqError / totalCount) : 0.0;
+        return new double[]{mae, rmse};
+    }
+
+    private void printConfusionMatrix(ConfusionMatrix cm, ArrayList<String> classLabels, String name) {
+        System.out.println(name + " -> Confusion Matrix (row=actual, column=predicted):");
+        System.out.print("Actual \\ Predicted\t");
+        for (String l : classLabels) System.out.print(l + "\t");
+        System.out.println();
+        for (String actual : classLabels) {
+            System.out.print(actual + "\t\t");
+            for (String pred : classLabels) {
+                int count = 0;
+                if (cm != null && cm.getMatrix().containsKey(actual)) {
+                    HashMap<String, Integer> row = cm.getMatrix().get(actual);
+                    if (row != null && row.containsKey(pred)) count = row.get(pred);
+                }
+                System.out.print(count + "\t");
+            }
+            System.out.println();
+        }
+        System.out.println();
+    }
+
+    @Test
+    public void testLinearPerceptronStandard() throws DiscreteFeaturesNotAllowed {
+        Job[] jobs = {
+                new Job("Core_Severity_withcross", 247, "S4", "S3", "normal", "critical"),
+                new Job("Core_Severity_nocross",   242, "S4", "S3", "normal", "critical"),
+                new Job("Firefox_Severity_withcross", 158, "S4", "S3", "normal", "critical"),
+                new Job("Firefox_Severity_nocross",   153, "S4", "S3", "normal", "critical"),
+                new Job("Core_Priority_withcross", 252, "P1", "P2", "P3", "P4", "P5"),
+                new Job("Core_Priority_nocross",   242, "P1", "P2", "P3", "P4", "P5"),
+                new Job("Firefox_Priority_withcross", 164, "P1", "P2", "P3", "P4", "P5"),
+                new Job("Firefox_Priority_nocross",   153, "P1", "P2", "P3", "P4", "P5"),
+        };
+        String[] conditions = {"processed", "smote", "undersampled"};
+        FoldExcelWriter excel = new FoldExcelWriter();
+
+        for (Job job : jobs) {
+            PreSplitFoldRun runner = new PreSplitFoldRun(K, FOLDS_DIR, job.numFeatures);
+            for (String cond : conditions) {
+                String name = job.prefix + "_" + cond;
+                long startTime = System.currentTimeMillis();
+                PreSplitFoldRun.FoldRunResult res;
+                try {
+                    res = runner.executeDetailed(job.prefix, cond, lpFactory(job.labels), getDefaultLPParameters());
+                } catch (Exception e) {
+                    System.out.println("SKIPPED (" + name + "): " + e.getMessage());
+                    continue;
+                }
+                double execSec = (System.currentTimeMillis() - startTime) / 1000.0;
+
+                for (int f = 0; f < res.perFold.size(); f++) {
+                    DetailedClassificationPerformance fp = res.perFold.get(f);
+                    if (fp == null || fp.getConfusionMatrix() == null) continue;
+                    ConfusionMatrix fcm = fp.getConfusionMatrix();
+                    double[] mr = calculateOrdinalMetrics(fcm, job.labels);
+                    excel.addFold(name, f, 1 - fp.getErrorRate(), fcm.weightedFMeasure(),
+                            mr[0], mr[1], fcm.getHighLowErrorRate(false, job.labels),
+                            fcm.getHighLowErrorRate(true, job.labels));
+                    excel.addConfusionMatrix(name, f, fcm, job.labels);
+                }
+
+                double accuracy = 1 - res.aggregate.meanPerformance().getErrorRate();
+                DetailedClassificationPerformance dp = res.aggregate.meanDetailedPerformance();
+                if (dp != null && dp.getConfusionMatrix() != null) {
+                    ConfusionMatrix cm = dp.getConfusionMatrix();
+                    double[] mr = calculateOrdinalMetrics(cm, job.labels);
+                    double loe = cm.getHighLowErrorRate(false, job.labels);
+                    double soe = cm.getHighLowErrorRate(true, job.labels);
+                    System.out.println("=== " + name + "Standard - LinearPerceptron");
+                    System.out.printf("Accuracy: %.2f%%\n", 100 * accuracy);
+                    System.out.printf("Weighted F-Measure: %.2f%%\n", 100 * cm.weightedFMeasure());
+                    System.out.printf("MAE (Ordinal): %.4f\n", mr[0]);
+                    System.out.printf("RMSE (Ordinal): %.4f\n", mr[1]);
+                    System.out.printf("LOE (Linear Ordinal Error): %.4f\n", loe);
+                    System.out.printf("SOE (Squared Ordinal Error): %.4f\n", soe);
+                    System.out.printf("Execution Time: %.2fs\n\n", execSec);
+                    printConfusionMatrix(cm, job.labels, name);
+                    excel.addMean(name, accuracy, cm.weightedFMeasure(), mr[0], mr[1], loe, soe, execSec);
+                    excel.addConfusionMatrix(name + "_MEAN", -1, cm, job.labels);
+                }
+            }
+        }
+        excel.writeToExcel("Results_LP_Standard_LeakageFree_PerFold.xlsx");
+        System.out.println(">>> Written: Results_LP_Standard_LeakageFree_PerFold.xlsx");
+    }
+}
